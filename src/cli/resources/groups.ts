@@ -57,6 +57,9 @@ registerResource({
       required: true,
     },
     { name: 'created_at', type: 'string', description: 'Auto-set.', generated: true },
+    { name: 'runner_id', type: 'string', description: 'Runner ID for remote execution. NULL = central-builtin (in-process).', generated: true },
+    { name: 'runner_cwd', type: 'string', description: 'Working directory on the runner host (Pattern B runner-backed agents).', generated: true },
+    { name: 'remote_session_id', type: 'string', description: 'Last claude --print session ID used for resumption (Pattern B).', generated: true },
   ],
   operations: { list: 'open', get: 'open', create: 'approval', update: 'approval', delete: 'approval' },
   customOperations: {
