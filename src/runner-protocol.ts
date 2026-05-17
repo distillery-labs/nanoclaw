@@ -29,7 +29,10 @@ export type MessageType =
   // Leave gap before 110-119 reserved for EVENT_EMIT (v0.4 event bus).
   | 'TOKEN_ROTATE_REQUEST'
   | 'TOKEN_ROTATE_ACK'
-  | 'TOKEN_INVALIDATE';
+  | 'TOKEN_INVALIDATE'
+  // Pattern B: runner-backed agent groups (v0.4)
+  | 'CLAUDE_INVOKE'
+  | 'CLAUDE_RESULT';
 
 export interface Frame<T extends MessageType = MessageType, P = unknown> {
   type: T;
@@ -264,6 +267,25 @@ export interface TokenRotateAckPayload {
 export interface TokenInvalidatePayload {
   reason: 'revoked' | 'compromised';
   message?: string;
+}
+
+// ── CLAUDE_INVOKE (C→R) ───────────────────────────────────────────────────────
+
+export interface ClaudeInvokePayload {
+  correlation_id: string;
+  cwd: string;
+  prompt: string;
+  resume_session_id?: string;
+}
+
+// ── CLAUDE_RESULT (R→C) ───────────────────────────────────────────────────────
+
+export interface ClaudeResultPayload {
+  correlation_id: string;
+  stdout: string;
+  session_id: string;
+  exit_code: number;
+  error?: string;
 }
 
 // ── Protocol version ──────────────────────────────────────────────────────────
