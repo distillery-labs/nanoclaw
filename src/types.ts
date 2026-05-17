@@ -9,6 +9,8 @@ export interface AgentGroup {
   created_at: string;
   /** NULL = central-builtin (in-process). Set to a runners.id for remote execution. */
   runner_id?: string | null;
+  runner_cwd?: string | null;
+  remote_session_id?: string | null;
 }
 
 /** Per-agent-group container runtime config. Source of truth in the DB;
@@ -58,7 +60,7 @@ export interface MessagingGroup {
  * User = a messaging-platform identifier. Namespaced so distinct channels
  * with numeric IDs don't collide: "phone:+1555...", "tg:123", "discord:456",
  * "email:a@x.com". A single human with a phone AND a telegram handle has
- * two separate users — no cross-channel linking (yet).
+ * two separate Users — no cross-channel linking (yet).
  */
 export interface User {
   id: string;
