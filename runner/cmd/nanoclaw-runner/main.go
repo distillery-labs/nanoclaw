@@ -30,7 +30,13 @@ func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "install":
-			if err := service.Install(); err != nil {
+			force := false
+			for _, arg := range os.Args[2:] {
+				if arg == "--force" {
+					force = true
+				}
+			}
+			if err := service.Install(force); err != nil {
 				log.Fatalf("nanoclaw-runner install: %v", err)
 			}
 			return
