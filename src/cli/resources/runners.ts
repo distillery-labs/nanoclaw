@@ -19,7 +19,12 @@ registerResource({
       enum: ['persistent', 'ephemeral'],
       default: 'persistent',
     },
-    { name: 'runner_token_hash', type: 'string', description: 'SHA-256 of the bearer token. Never shown after creation.', generated: true },
+    {
+      name: 'runner_token_hash',
+      type: 'string',
+      description: 'SHA-256 of the bearer token. Never shown after creation.',
+      generated: true,
+    },
     {
       name: 'status',
       type: 'string',
@@ -72,7 +77,8 @@ registerResource({
     },
     rotate: {
       access: 'approval',
-      description: 'Rotate the bearer token for a runner. New token is shown once; old token is invalidated immediately.',
+      description:
+        'Rotate the bearer token for a runner. New token is shown once; old token is invalidated immediately.',
       args: [{ name: 'id', type: 'string', description: 'Runner ID.', required: true }],
       async handler(args) {
         const id = args.id as string;

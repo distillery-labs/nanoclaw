@@ -22,6 +22,6 @@ export const migration016: Migration = {
 
     // Agent groups can be assigned to a remote runner.
     // NULL means central-builtin (in-process execution, existing behavior).
-    db.prepare("ALTER TABLE agent_groups ADD COLUMN runner_id TEXT REFERENCES runners(id)").run();
+    db.prepare('ALTER TABLE agent_groups ADD COLUMN runner_id TEXT REFERENCES runners(id)').run();
   },
 };

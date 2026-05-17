@@ -132,9 +132,7 @@ function getRunnerByName(name: string): RunnerRow | undefined {
 
 function upsertRunnerStatus(id: string, status: string, version: string, protocol: string): void {
   getDb()
-    .prepare(
-      `UPDATE runners SET status = ?, last_heartbeat = ?, runner_version = ?, protocol_version = ? WHERE id = ?`,
-    )
+    .prepare(`UPDATE runners SET status = ?, last_heartbeat = ?, runner_version = ?, protocol_version = ? WHERE id = ?`)
     .run(status, new Date().toISOString(), version, protocol, id);
 }
 
@@ -155,13 +153,15 @@ function getAssignedAgents(runnerId: string): RunnerConfig {
       runner_id: runnerId,
       model: g.model ?? 'claude-opus-4-5',
       instructions: '',
-      mcp_servers: g.mcp_servers ? (JSON.parse(g.mcp_servers) as Record<string, unknown>[]).map((s: Record<string, unknown>) => ({
-        name: String(s.name ?? ''),
-        command: String(s.command ?? ''),
-        args: (s.args as string[]) ?? [],
-        env: s.env as Record<string, string> | undefined,
-        local: Boolean(s.local ?? false),
-      })) : [],
+      mcp_servers: g.mcp_servers
+        ? (JSON.parse(g.mcp_servers) as Record<string, unknown>[]).map((s: Record<string, unknown>) => ({
+            name: String(s.name ?? ''),
+            command: String(s.command ?? ''),
+            args: (s.args as string[]) ?? [],
+            env: s.env as Record<string, string> | undefined,
+            local: Boolean(s.local ?? false),
+          }))
+        : [],
       workspace_path: `/workspace/groups/${g.folder}`,
     })),
   };
@@ -352,7 +352,10 @@ function handleMessageAck(conn: RunnerConn, frame: Frame<'MESSAGE_ACK', MessageA
   });
 }
 
-async function handleToolCallProxy(conn: RunnerConn, frame: Frame<'TOOL_CALL_PROXY', ToolCallProxyPayload>): Promise<void> {
+async function handleToolCallProxy(
+  conn: RunnerConn,
+  frame: Frame<'TOOL_CALL_PROXY', ToolCallProxyPayload>,
+): Promise<void> {
   const { call_id, tool_name, tool_input } = frame.payload;
   log.debug('TOOL_CALL_PROXY', { runnerId: conn.runnerId, callId: call_id, toolName: tool_name });
 
@@ -495,9 +498,7 @@ export function startRunnerRegistry(): void {
       if (conn) {
         log.info('Runner disconnected', { runnerId: conn.runnerId });
         // Don't remove from connections map — keeps replay buffer alive for reconnect.
-        getDb()
-          .prepare("UPDATE runners SET status = 'disconnected' WHERE id = ?")
-          .run(conn.runnerId);
+        getDb().prepare("UPDATE runners SET status = 'disconnected' WHERE id = ?").run(conn.runnerId);
       }
     });
 
