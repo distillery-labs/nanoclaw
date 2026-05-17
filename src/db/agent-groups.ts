@@ -1,3 +1,4 @@
+import type Database from 'better-sqlite3';
 import type { AgentGroup } from '../types.js';
 import { getDb } from './connection.js';
 
@@ -44,7 +45,7 @@ export function updateAgentGroup(id: string, updates: Partial<Pick<AgentGroup, '
     .run(values);
 }
 
-export function updateRunnerRemoteSessionId(db: ReturnType<typeof getDb>, groupId: string, sessionId: string): void {
+export function updateRunnerRemoteSessionId(db: Database.Database, groupId: string, sessionId: string): void {
   db.prepare('UPDATE agent_groups SET remote_session_id = ? WHERE id = ?').run(sessionId, groupId);
 }
 
