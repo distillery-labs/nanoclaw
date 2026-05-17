@@ -14,6 +14,7 @@ import (
 	"github.com/nanocoai/nanoclaw/runner/internal/config"
 	"github.com/nanocoai/nanoclaw/runner/internal/keychain"
 	"github.com/nanocoai/nanoclaw/runner/internal/protocol"
+	"github.com/nanocoai/nanoclaw/runner/internal/service"
 	"github.com/nanocoai/nanoclaw/runner/internal/updater"
 )
 
@@ -25,6 +26,22 @@ var (
 )
 
 func main() {
+	// Subcommand dispatch: install / uninstall
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "install":
+			if err := service.Install(); err != nil {
+				log.Fatalf("nanoclaw-runner install: %v", err)
+			}
+			return
+		case "uninstall":
+			if err := service.Uninstall(); err != nil {
+				log.Fatalf("nanoclaw-runner uninstall: %v", err)
+			}
+			return
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("nanoclaw-runner: config error: %v", err)
