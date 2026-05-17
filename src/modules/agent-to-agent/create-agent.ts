@@ -38,6 +38,8 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
   const requestId = content.requestId as string;
   const name = content.name as string;
   const instructions = content.instructions as string | null;
+  const runnerId = content.runner_id as string | undefined;
+  const cwd = content.cwd as string | undefined;
 
   const sourceGroup = getAgentGroup(session.agent_group_id);
   if (!sourceGroup) {
@@ -74,15 +76,21 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
   const agentGroupId = `ag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
 
+  const isRunnerBacked = !!(runnerId && cwd);
+
   const newGroup: AgentGroup = {
     id: agentGroupId,
     name,
     folder,
     agent_provider: null,
     created_at: now,
+    ...(isRunnerBacked ? { runner_id: runnerId, runner_cwd: cwd } : {}),
   };
   createAgentGroup(newGroup);
-  initGroupFilesystem(newGroup, { instructions: instructions ?? undefined });
+
+  if (!isRunnerBacked) {
+    initGroupFilesystem(newGroup, { instructions: instructions ?? undefined });
+  }
 
   // Insert bidirectional destination rows (= ACL grants).
   // Creator refers to child by the name it chose; child refers to creator as "parent".
@@ -120,7 +128,7 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
     session,
     `Agent "${localName}" created. You can now message it with <message to="${localName}">...</message>.`,
   );
-  log.info('Agent group created', { agentGroupId, name, localName, folder, parent: sourceGroup.id });
+  log.info('Agent group created', { agentGroupId, name, localName, folder, parent: sourceGroup.id, isRunnerBacked });
   // Note: requestId is unused — this is fire-and-forget, not request/response.
   void requestId;
 }
