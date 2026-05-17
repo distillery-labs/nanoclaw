@@ -30,7 +30,9 @@ var envKeys = []string{
 }
 
 // Install writes the service file and registers it with the platform service manager.
-func Install() error {
+// If force is false and a service file already exists, Install returns an error rather
+// than silently overwriting. Pass force=true to unload/stop, overwrite, and reload.
+func Install(force bool) error {
 	name := os.Getenv("NANOCLAW_RUNNER_NAME")
 	if name == "" {
 		return fmt.Errorf("NANOCLAW_RUNNER_NAME is required for install")
@@ -49,9 +51,9 @@ func Install() error {
 
 	switch runtime.GOOS {
 	case "darwin":
-		return installDarwin(name, binaryPath, env)
+		return installDarwin(name, binaryPath, env, force)
 	case "linux":
-		return installLinux(name, binaryPath, env)
+		return installLinux(name, binaryPath, env, force)
 	default:
 		return fmt.Errorf("unsupported platform: %s; install the service manually", runtime.GOOS)
 	}
@@ -125,11 +127,24 @@ func plistPath(name string) (string, error) {
 		fmt.Sprintf("com.nanoclaw.runner.%s.plist", name)), nil
 }
 
-func installDarwin(name, binaryPath string, env []envEntry) error {
+func installDarwin(name, binaryPath string, env []envEntry, force bool) error {
 	path, err := plistPath(name)
 	if err != nil {
 		return err
 	}
+
+	if _, statErr := os.Stat(path); statErr == nil {
+		if !force {
+			return fmt.Errorf("service file already exists: %s\n"+
+				"  Run with --force to unload, overwrite, and reload", path)
+		}
+		if out, err := exec.Command("launchctl", "unload", path).CombinedOutput(); err != nil {
+			fmt.Printf("nanoclaw-runner: warning: launchctl unload (pre-reinstall): %v\n%s\n", err, out)
+		} else {
+			fmt.Printf("nanoclaw-runner: unloaded existing service before reinstall\n")
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 	}
@@ -208,11 +223,25 @@ func unitPath(name string) (string, error) {
 		fmt.Sprintf("nanoclaw-runner-%s.service", name)), nil
 }
 
-func installLinux(name, binaryPath string, env []envEntry) error {
+func installLinux(name, binaryPath string, env []envEntry, force bool) error {
 	path, err := unitPath(name)
 	if err != nil {
 		return err
 	}
+
+	if _, statErr := os.Stat(path); statErr == nil {
+		if !force {
+			return fmt.Errorf("service file already exists: %s\n"+
+				"  Run with --force to stop, overwrite, and re-enable", path)
+		}
+		unitName := fmt.Sprintf("nanoclaw-runner-%s.service", name)
+		if out, err := exec.Command("systemctl", "--user", "disable", "--now", unitName).CombinedOutput(); err != nil {
+			fmt.Printf("nanoclaw-runner: warning: systemctl disable --now (pre-reinstall): %v\n%s\n", err, out)
+		} else {
+			fmt.Printf("nanoclaw-runner: stopped and disabled existing service before reinstall\n")
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 	}
@@ -284,7 +313,6 @@ func collectEnv() []envEntry {
 // escapeEnvValue escapes a value for safe embedding in service files.
 // Handles common special characters that would break plist XML or systemd unit syntax.
 func escapeEnvValue(v string) string {
-	// For plist: XML special chars
 	v = strings.ReplaceAll(v, "&", "&amp;")
 	v = strings.ReplaceAll(v, "<", "&lt;")
 	v = strings.ReplaceAll(v, ">", "&gt;")
