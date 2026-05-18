@@ -82,11 +82,14 @@ const connections = new Map<string, RunnerConn>();
 const toolWaiters = new Map<string, (result: ToolResultProxyPayload) => void>();
 
 /** CLAUDE_INVOKE result waiters: correlation_id → resolve/reject/timer. */
-const claudeInvokeWaiters = new Map<string, {
-  resolve: (result: ClaudeResultPayload) => void;
-  reject: (err: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-}>();
+const claudeInvokeWaiters = new Map<
+  string,
+  {
+    resolve: (result: ClaudeResultPayload) => void;
+    reject: (err: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }
+>();
 
 // ── Token hashing + minting ───────────────────────────────────────────────────
 
@@ -519,15 +522,15 @@ export function registerRunnerResponseHandler(handler: RunnerResponseHandler): v
 
 // ── CLAUDE_INVOKE: send to runner and await CLAUDE_RESULT ─────────────────────
 
-export async function sendClaudeInvoke(
-  runnerId: string,
-  payload: ClaudeInvokePayload,
-): Promise<ClaudeResultPayload> {
+export async function sendClaudeInvoke(runnerId: string, payload: ClaudeInvokePayload): Promise<ClaudeResultPayload> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      claudeInvokeWaiters.delete(payload.correlation_id);
-      reject(new Error('CLAUDE_INVOKE timeout after 30 minutes'));
-    }, 30 * 60 * 1000);
+    const timer = setTimeout(
+      () => {
+        claudeInvokeWaiters.delete(payload.correlation_id);
+        reject(new Error('CLAUDE_INVOKE timeout after 30 minutes'));
+      },
+      30 * 60 * 1000,
+    );
     claudeInvokeWaiters.set(payload.correlation_id, { resolve, reject, timer });
     const conn = connections.get(runnerId);
     if (!conn || conn.ws.readyState !== WebSocket.OPEN) {
