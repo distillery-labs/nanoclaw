@@ -34,9 +34,11 @@ import { getAgentGroup } from './db/agent-groups.js';
 import {
   countDueMessages,
   deleteOrphanProcessingClaims,
+  getDueMessage,
   getContainerState,
   getMessageForRetry,
   getProcessingClaims,
+  markMessageCompleted,
   markMessageFailed,
   retryWithBackoff,
   syncProcessingAcks,
@@ -45,7 +47,16 @@ import {
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
-import type { Session } from './types.js';
+import { dispatchRunnerBackedInvoke } from './runner-dispatch.js';
+import type { AgentGroup, Session } from './types.js';
+
+function safeParseContent(raw: string): { text?: string } {
+  try {
+    return JSON.parse(raw) as { text?: string };
+  } catch {
+    return { text: raw };
+  }
+}
 
 /**
  * SQLite TIMESTAMP columns store UTC without a timezone marker. Date.parse
@@ -171,18 +182,25 @@ async function sweepSession(session: Session): Promise<void> {
       syncProcessingAcks(inDb, outDb);
     }
 
-    // 2. Wake a container if work is due and nothing is running. Ordered
-    // before the crashed-container cleanup so a fresh container gets a chance
-    // to clean its own orphan processing_ack rows on startup (see
-    // container/agent-runner/src/db/connection.ts). Otherwise the reset path
-    // would keep bumping process_after into the future, dueCount would stay 0,
-    // and the wake would never fire.
+    // 2. Wake a container (or dispatch via CLAUDE_INVOKE for runner-backed
+    // groups) if work is due. Ordered before the crashed-container cleanup so
+    // a fresh container gets a chance to clean its own orphan processing_ack
+    // rows on startup (see container/agent-runner/src/db/connection.ts).
+    // Otherwise the reset path would keep bumping process_after into the
+    // future, dueCount would stay 0, and the wake would never fire.
     const dueCount = countDueMessages(inDb);
-    if (dueCount > 0 && !isContainerRunning(session.id)) {
-      log.info('Waking container for due messages', { sessionId: session.id, count: dueCount });
-      // wakeContainer never throws — transient spawn failures (OneCLI down,
-      // etc.) return false and leave messages pending for the next tick.
-      await wakeContainer(session);
+    if (dueCount > 0) {
+      if (agentGroup.runner_id && agentGroup.runner_cwd) {
+        // Pattern B: runner-backed group — dispatch via CLAUDE_INVOKE instead
+        // of waking a container. dispatchRunnerBackedInvoke guards against
+        // re-dispatch while an invoke is already in flight (inFlightSessions).
+        await sweepRunnerBackedInvoke(agentGroup, session, inDb);
+      } else if (!isContainerRunning(session.id)) {
+        log.info('Waking container for due messages', { sessionId: session.id, count: dueCount });
+        // wakeContainer never throws — transient spawn failures (OneCLI down,
+        // etc.) return false and leave messages pending for the next tick.
+        await wakeContainer(session);
+      }
     }
 
     const alive = isContainerRunning(session.id);
@@ -325,4 +343,57 @@ function resetStuckProcessingRows(
   } finally {
     if (ownsDb) useDb?.close();
   }
+}
+
+/**
+ * Sweep handler for runner-backed groups: reads the oldest due message and
+ * dispatches it via CLAUDE_INVOKE. Marks the message completed when the
+ * invoke settles so the next sweep tick doesn't re-dispatch it.
+ *
+ * Fire-and-forget internally — returns after kicking off the async work so
+ * the sweep loop can continue to other sessions.
+ */
+async function sweepRunnerBackedInvoke(
+  agentGroup: AgentGroup,
+  session: Session,
+  inDb: Database.Database,
+): Promise<void> {
+  const msg = getDueMessage(inDb);
+  if (!msg) return;
+
+  const content = safeParseContent(msg.content);
+  const deliveryAddr = {
+    channelType: msg.channel_type ?? '',
+    platformId: msg.platform_id ?? '',
+    threadId: msg.thread_id ?? null,
+  };
+
+  log.info('Dispatching runner-backed message via CLAUDE_INVOKE (sweep)', {
+    sessionId: session.id,
+    agentGroupId: agentGroup.id,
+    runnerId: agentGroup.runner_id,
+    messageId: msg.id,
+  });
+
+  // Fire-and-forget. dispatchRunnerBackedInvoke guards against concurrent
+  // re-dispatch via inFlightSessions. After it settles (success or error),
+  // mark the inbound message completed so the sweep stops re-queuing it.
+  void dispatchRunnerBackedInvoke(agentGroup, session, content.text ?? '', deliveryAddr)
+    .then(() => {
+      try {
+        const db = openInboundDb(agentGroup.id, session.id);
+        try {
+          markMessageCompleted(db, msg.id);
+        } finally {
+          db.close();
+        }
+      } catch (err) {
+        log.warn('Failed to mark runner-backed message completed', {
+          sessionId: session.id,
+          messageId: msg.id,
+          err,
+        });
+      }
+    })
+    .catch((err) => log.error('sweepRunnerBackedInvoke threw', { sessionId: session.id, err }));
 }
