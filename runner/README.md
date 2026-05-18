@@ -27,7 +27,7 @@ ncl runners add --name my-runner
 # Token expires in 10 minutes and is single-use.
 ```
 
-Start the runner on the remote machine with the bootstrap token:
+Run the runner once on the remote machine to exchange the bootstrap token for a long-lived credential:
 
 ```bash
 export NANOCLAW_CENTRAL_URL=wss://your-nanoclaw-host/runner/connect
@@ -36,6 +36,35 @@ NANOCLAW_RUNNER_BOOTSTRAP=<token from ncl runners add> nanoclaw-runner
 ```
 
 On first connect the runner exchanges the bootstrap token for a long-lived credential, which is stored in the platform credential directory (see below). Subsequent restarts use the saved credential — no token in the environment.
+
+## Service installation
+
+`nanoclaw-runner install` is the recommended way to run the runner persistently. It writes and registers a service file from the current environment, so the runner starts automatically on login and restarts on failure.
+
+**Requirements:** `NANOCLAW_RUNNER_NAME` must be set. All other `NANOCLAW_*` env vars present at install time are captured and embedded in the service file. `NANOCLAW_RUNNER_BOOTSTRAP` is intentionally excluded — it is a single-use token and is already consumed by the first connection.
+
+```bash
+# Set required env vars first (bootstrap token already consumed)
+export NANOCLAW_CENTRAL_URL=wss://your-nanoclaw-host/runner/connect
+export NANOCLAW_RUNNER_NAME=my-runner
+
+nanoclaw-runner install
+```
+
+The command prints the path of the service file it wrote, loads/enables it, and shows the service status.
+
+| Platform | Service file location | Manager |
+|---|---|---|
+| macOS | `~/Library/LaunchAgents/com.nanoclaw.runner.<name>.plist` | `launchctl load` |
+| Linux | `~/.config/systemd/user/nanoclaw-runner-<name>.service` | `systemctl --user enable --now` |
+
+**Uninstall:**
+
+```bash
+NANOCLAW_RUNNER_NAME=my-runner nanoclaw-runner uninstall
+```
+
+Stops the service, removes the service file, and (on Linux) reloads the systemd daemon.
 
 ## Credential storage
 
