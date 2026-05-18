@@ -17,9 +17,10 @@
  * drops (no agent wired, no trigger match); the access gate writes rows
  * for policy refusals.
  */
+import crypto from 'crypto';
 import { getChannelAdapter } from './channels/channel-registry.js';
 import { gateCommand } from './command-gate.js';
-import { getAgentGroup } from './db/agent-groups.js';
+import { getAgentGroup, updateRunnerRemoteSessionId } from './db/agent-groups.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import {
   createMessagingGroup,
@@ -31,10 +32,11 @@ import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
-import { dispatchToRunner, isRunnerConnected } from './runner-registry.js';
+import { dispatchToRunner, isRunnerConnected, sendClaudeInvoke } from './runner-registry.js';
 import { getSession } from './db/sessions.js';
-import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
-import type { InboundEvent } from './channels/adapter.js';
+import { getDb } from './db/connection.js';
+import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
+import type { DeliveryAddress, InboundEvent } from './channels/adapter.js';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -395,6 +397,51 @@ function evaluateEngage(
   }
 }
 
+async function handleRunnerBackedInvoke(
+  agentGroup: AgentGroup,
+  session: Session,
+  prompt: string,
+  deliveryAddr: DeliveryAddress,
+): Promise<void> {
+  const correlationId = crypto.randomUUID();
+  try {
+    const result = await sendClaudeInvoke(agentGroup.runner_id!, {
+      correlation_id: correlationId,
+      cwd: agentGroup.runner_cwd!,
+      prompt,
+      resume_session_id: agentGroup.remote_session_id ?? undefined,
+    });
+    // Persist session ID for resumption
+    if (result.session_id) {
+      updateRunnerRemoteSessionId(getDb(), agentGroup.id, result.session_id);
+    }
+    // Write reply
+    writeOutboundDirect(agentGroup.id, session.id, {
+      id: `runner-reply-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'chat',
+      platformId: deliveryAddr.platformId,
+      channelType: deliveryAddr.channelType,
+      threadId: deliveryAddr.threadId,
+      content: JSON.stringify({ text: result.stdout || result.error || '' }),
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isTimeout = msg.includes('timeout after 30 minutes');
+    const errorText = isTimeout
+      ? '[claude turn exceeded 30-minute cap; check claude --print progress on the runner host directly]'
+      : `[runner invoke failed: ${msg}]`;
+    // On timeout: do NOT clear remote_session_id — runner may still complete, enabling resume
+    writeOutboundDirect(agentGroup.id, session.id, {
+      id: `runner-reply-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'chat',
+      platformId: deliveryAddr.platformId,
+      channelType: deliveryAddr.channelType,
+      threadId: deliveryAddr.threadId,
+      content: JSON.stringify({ text: errorText }),
+    });
+  }
+}
+
 async function deliverToAgent(
   agent: MessagingGroupAgent,
   agentGroup: AgentGroup,
@@ -474,6 +521,16 @@ async function deliverToAgent(
     // Typing indicator + wake are only for the engaged branch; accumulated
     // messages sit silently until a real trigger fires.
     startTypingRefresh(session.id, session.agent_group_id, event.channelType, event.platformId, event.threadId);
+
+    if (agentGroup.runner_id && agentGroup.runner_cwd) {
+      // Pattern B: runner-backed CLAUDE_INVOKE
+      const content = safeParseContent(event.message.content);
+      void handleRunnerBackedInvoke(agentGroup, session, content.text ?? '', deliveryAddr).catch((err) =>
+        log.error('handleRunnerBackedInvoke threw', { err }),
+      );
+      stopTypingRefresh(session.id);
+      return;
+    }
 
     if (agentGroup.runner_id && agentGroup.runner_id !== 'central-builtin') {
       // Remote runner: dispatch via INBOUND_MESSAGE over the runner WebSocket.

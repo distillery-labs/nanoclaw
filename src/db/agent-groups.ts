@@ -1,13 +1,19 @@
+import type Database from 'better-sqlite3';
 import type { AgentGroup } from '../types.js';
 import { getDb } from './connection.js';
 
 export function createAgentGroup(group: AgentGroup): void {
   getDb()
     .prepare(
-      `INSERT INTO agent_groups (id, name, folder, agent_provider, runner_id, created_at)
-       VALUES (@id, @name, @folder, @agent_provider, @runner_id, @created_at)`,
+      `INSERT INTO agent_groups (id, name, folder, agent_provider, runner_id, runner_cwd, remote_session_id, created_at)
+       VALUES (@id, @name, @folder, @agent_provider, @runner_id, @runner_cwd, @remote_session_id, @created_at)`,
     )
-    .run({ ...group, runner_id: group.runner_id ?? null });
+    .run({
+      ...group,
+      runner_id: group.runner_id ?? null,
+      runner_cwd: group.runner_cwd ?? null,
+      remote_session_id: group.remote_session_id ?? null,
+    });
 }
 
 export function getAgentGroup(id: string): AgentGroup | undefined {
@@ -37,6 +43,10 @@ export function updateAgentGroup(id: string, updates: Partial<Pick<AgentGroup, '
   getDb()
     .prepare(`UPDATE agent_groups SET ${fields.join(', ')} WHERE id = @id`)
     .run(values);
+}
+
+export function updateRunnerRemoteSessionId(db: Database.Database, groupId: string, sessionId: string): void {
+  db.prepare('UPDATE agent_groups SET remote_session_id = ? WHERE id = ?').run(sessionId, groupId);
 }
 
 export function deleteAgentGroup(id: string): void {

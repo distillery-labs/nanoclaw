@@ -36,8 +36,16 @@ export const createAgent: McpToolDefinition = {
     inputSchema: {
       type: 'object' as const,
       properties: {
-        name: { type: 'string', description: 'Human-readable name (also becomes your destination name for this agent)' },
-        instructions: { type: 'string', description: 'CLAUDE.md content for the new agent (personality, role, instructions)' },
+        name: {
+          type: 'string',
+          description: 'Human-readable name (also becomes your destination name for this agent)',
+        },
+        instructions: {
+          type: 'string',
+          description: 'CLAUDE.md content for the new agent (personality, role, instructions)',
+        },
+        runner_id: { type: 'string', description: 'Runner ID to back this agent group (for runner-backed agents)' },
+        cwd: { type: 'string', description: 'Working directory on the runner host' },
       },
       required: ['name'],
     },
@@ -55,6 +63,8 @@ export const createAgent: McpToolDefinition = {
         requestId,
         name,
         instructions: (args.instructions as string) || null,
+        runner_id: (args.runner_id as string) || undefined,
+        cwd: (args.cwd as string) || undefined,
       }),
     });
 
