@@ -442,7 +442,6 @@ async function handleRunnerBackedInvoke(
   }
 }
 
-
 async function deliverToAgent(
   agent: MessagingGroupAgent,
   agentGroup: AgentGroup,
@@ -526,8 +525,9 @@ async function deliverToAgent(
     if (agentGroup.runner_id && agentGroup.runner_cwd) {
       // Pattern B: runner-backed CLAUDE_INVOKE
       const content = safeParseContent(event.message.content);
-      void handleRunnerBackedInvoke(agentGroup, session, content.text ?? '', deliveryAddr)
-        .catch(err => log.error('handleRunnerBackedInvoke threw', { err }));
+      void handleRunnerBackedInvoke(agentGroup, session, content.text ?? '', deliveryAddr).catch((err) =>
+        log.error('handleRunnerBackedInvoke threw', { err }),
+      );
       stopTypingRefresh(session.id);
       return;
     }
