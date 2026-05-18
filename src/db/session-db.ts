@@ -146,6 +146,33 @@ export function countDueMessages(db: Database.Database): number {
   ).count;
 }
 
+export interface DueMessage {
+  id: string;
+  content: string;
+  channel_type: string | null;
+  platform_id: string | null;
+  thread_id: string | null;
+  tries: number;
+}
+
+/** Return the oldest due trigger message, or undefined if none. */
+export function getDueMessage(db: Database.Database): DueMessage | undefined {
+  return db
+    .prepare(
+      `SELECT id, content, channel_type, platform_id, thread_id, tries FROM messages_in
+       WHERE status = 'pending'
+         AND trigger = 1
+         AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
+       ORDER BY seq ASC
+       LIMIT 1`,
+    )
+    .get() as DueMessage | undefined;
+}
+
+export function markMessageCompleted(db: Database.Database, messageId: string): void {
+  db.prepare("UPDATE messages_in SET status = 'completed' WHERE id = ?").run(messageId);
+}
+
 export function markMessageFailed(db: Database.Database, messageId: string): void {
   db.prepare("UPDATE messages_in SET status = 'failed' WHERE id = ?").run(messageId);
 }
