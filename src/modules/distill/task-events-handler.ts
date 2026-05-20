@@ -47,10 +47,12 @@ function pgHeaders(env: DistillEnv, returnRepresentation = false): Record<string
 }
 
 async function insertTaskEvent(env: DistillEnv, taskId: string, eventType: string, sessionId: string): Promise<void> {
+  // task_events schema: (id, task_id, event_type, payload, created_at).
+  // No top-level session column — nest agent_session_id in payload jsonb.
   const res = await fetch(`${env.supabaseUrl}/rest/v1/task_events`, {
     method: 'POST',
     headers: pgHeaders(env),
-    body: JSON.stringify({ task_id: taskId, event_type: eventType, agent_session_id: sessionId }),
+    body: JSON.stringify({ task_id: taskId, event_type: eventType, payload: { agent_session_id: sessionId } }),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');

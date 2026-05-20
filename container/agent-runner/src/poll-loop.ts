@@ -104,6 +104,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         log(`Failed to query Distill status for task ${tid}: ${err instanceof Error ? err.message : String(err)}`);
         return null; // unknown — treat as active, restore it
       });
+      // null means either network error (caught above) or task not found in Distill
+      // (getTaskStatus returns null for missing rows). Both cases use the same
+      // conservative restore — better to spin up a no-op session than to silently
+      // drop a continuation for a task that's legitimately still active.
       if (status !== null && status !== 'pending' && status !== 'in_progress') {
         log(`Skipping stale task continuation for ${tid} (status: ${status})`);
         clearTaskContinuation(tid);
