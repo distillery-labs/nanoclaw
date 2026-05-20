@@ -458,6 +458,7 @@ async function deliverToAgent(
     threadId: deliveryAddr.threadId,
     content: event.message.content,
     trigger: wake ? 1 : 0,
+    taskId: event.taskId ?? null,
   });
 
   log.info('Message routed', {

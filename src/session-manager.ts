@@ -221,6 +221,10 @@ export function writeSessionMessage(
      * Dying containers (past first poll) skip these rows.
      */
     onWake?: 0 | 1;
+    /**
+     * Sub-Skippy multiplex: NULL = main session, UUID = named Distill task session.
+     */
+    taskId?: string | null;
   },
 ): void {
   // Extract base64 attachment data, save to inbox, replace with file paths
@@ -241,6 +245,7 @@ export function writeSessionMessage(
       trigger: message.trigger ?? 1,
       sourceSessionId: message.sourceSessionId ?? null,
       onWake: message.onWake ?? 0,
+      taskId: message.taskId ?? null,
     });
   } finally {
     db.close();
