@@ -48,6 +48,22 @@ export interface TaskSessionEntry {
 }
 
 /**
+ * Write a system action to outbound.db so the host delivery loop can pick it
+ * up and forward it to Distill. Used for task session lifecycle events.
+ */
+function writeTaskEventAction(
+  taskId: string,
+  eventType: 'session_created' | 'session_resumed' | 'session_completed' | 'session_aborted',
+): void {
+  writeMessageOut({
+    id: generateId(),
+    kind: 'system',
+    content: JSON.stringify({ action: 'task_event', task_id: taskId, event_type: eventType }),
+    task_id: taskId,
+  });
+}
+
+/**
  * Main poll loop. Runs indefinitely until the process is killed.
  *
  * 1. Poll messages_in for pending rows
@@ -70,6 +86,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   }
 
   // Restore task sessions from persisted continuations (crash recovery).
+  // TODO (PR C.5): filter by tasks.status IN ('pending', 'in_progress') via Distill API
+  // so we don't spin up task sessions for completed/cancelled tasks on restart.
   const taskSessions = new Map<string, TaskSessionEntry>();
   for (const [tid, sessionId] of getAllTaskContinuations()) {
     taskSessions.set(tid, { taskId: tid, continuation: sessionId, queryPromise: null });
@@ -298,6 +316,7 @@ async function processQuery(
   initialBatchIds: string[],
   providerName: string,
   taskId: string | null = null,
+  inputContinuation?: string,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -408,6 +427,7 @@ async function processQuery(
           setContinuation(providerName, event.continuation);
         } else {
           setTaskContinuation(taskId, event.continuation);
+          writeTaskEventAction(taskId, inputContinuation ? 'session_resumed' : 'session_created');
         }
       } else if (event.type === 'result') {
         // A result — with or without text — means the turn is done. Mark
@@ -589,13 +609,15 @@ export async function dispatchTaskSession(
     systemContext: config.systemContext,
   });
 
-  const queryPromise = processQuery(query, routing, ids, config.providerName, taskId)
+  let sessionErrored = false;
+  const queryPromise = processQuery(query, routing, ids, config.providerName, taskId, currentEntry.continuation)
     .then((result) => {
       if (result.continuation) {
         currentEntry.continuation = result.continuation;
       }
     })
     .catch((err) => {
+      sessionErrored = true;
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`Task session ${taskId} error: ${errMsg}`);
       if (currentEntry.continuation && config.provider.isSessionInvalid(err)) {
@@ -603,6 +625,7 @@ export async function dispatchTaskSession(
         currentEntry.continuation = undefined;
         clearTaskContinuation(taskId);
       }
+      writeTaskEventAction(taskId, 'session_aborted');
       writeMessageOut({
         id: generateId(),
         kind: 'chat',
@@ -616,6 +639,9 @@ export async function dispatchTaskSession(
     .finally(() => {
       currentEntry.queryPromise = null;
       markCompleted(ids);
+      if (!sessionErrored) {
+        writeTaskEventAction(taskId, 'session_completed');
+      }
       log(`Task session ${taskId} completed`);
     });
 
