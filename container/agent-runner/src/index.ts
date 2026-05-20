@@ -32,6 +32,7 @@ import { buildSystemPromptAddendum } from './destinations.js';
 import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
 import { runPollLoop } from './poll-loop.js';
+import { createDistillClient } from './distill-client.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
@@ -100,6 +101,7 @@ async function main(): Promise<void> {
     providerName,
     cwd: CWD,
     systemContext: { instructions },
+    distillClient: createDistillClient() ?? undefined,
   });
 }
 

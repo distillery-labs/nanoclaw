@@ -1,6 +1,7 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, getPendingMessagesForSession, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
+import type { DistillClientInterface } from './distill-client.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation, getAllTaskContinuations, setTaskContinuation, clearTaskContinuation } from './db/session-state.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
@@ -38,6 +39,13 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
+  /**
+   * Optional Distill API client. When present:
+   *   - Startup: stale task continuations (terminal status) are filtered out and
+   *     their KV entries cleared to prevent unbounded growth.
+   *   - Init event (task branch): session_id is written back to Distill immediately.
+   */
+  distillClient?: DistillClientInterface;
 }
 
 /** @internal — exported for testing only */
@@ -86,10 +94,22 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   }
 
   // Restore task sessions from persisted continuations (crash recovery).
-  // TODO (PR C.5): filter by tasks.status IN ('pending', 'in_progress') via Distill API
-  // so we don't spin up task sessions for completed/cancelled tasks on restart.
+  // Filter against Distill task status: skip (and clear KV for) tasks that are
+  // already in a terminal state so the local store doesn't grow monotonically
+  // and we don't spin up no-op sessions for completed/cancelled work.
   const taskSessions = new Map<string, TaskSessionEntry>();
   for (const [tid, sessionId] of getAllTaskContinuations()) {
+    if (config.distillClient) {
+      const status = await config.distillClient.getTaskStatus(tid).catch((err) => {
+        log(`Failed to query Distill status for task ${tid}: ${err instanceof Error ? err.message : String(err)}`);
+        return null; // unknown — treat as active, restore it
+      });
+      if (status !== null && status !== 'pending' && status !== 'in_progress') {
+        log(`Skipping stale task continuation for ${tid} (status: ${status})`);
+        clearTaskContinuation(tid);
+        continue;
+      }
+    }
     taskSessions.set(tid, { taskId: tid, continuation: sessionId, queryPromise: null });
     log(`Restored task session continuation for ${tid}`);
   }
@@ -317,6 +337,7 @@ async function processQuery(
   providerName: string,
   taskId: string | null = null,
   inputContinuation?: string,
+  distillClient?: DistillClientInterface,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -428,6 +449,10 @@ async function processQuery(
         } else {
           setTaskContinuation(taskId, event.continuation);
           writeTaskEventAction(taskId, inputContinuation ? 'session_resumed' : 'session_created');
+          // Best-effort session_id write-back — fire-and-forget, never block the turn.
+          distillClient?.patchTaskSessionId(taskId, event.continuation).catch((err) => {
+            log(`Failed to write session_id to Distill for task ${taskId}: ${err instanceof Error ? err.message : String(err)}`);
+          });
         }
       } else if (event.type === 'result') {
         // A result — with or without text — means the turn is done. Mark
@@ -610,7 +635,7 @@ export async function dispatchTaskSession(
   });
 
   let sessionErrored = false;
-  const queryPromise = processQuery(query, routing, ids, config.providerName, taskId, currentEntry.continuation)
+  const queryPromise = processQuery(query, routing, ids, config.providerName, taskId, currentEntry.continuation, config.distillClient)
     .then((result) => {
       if (result.continuation) {
         currentEntry.continuation = result.continuation;
