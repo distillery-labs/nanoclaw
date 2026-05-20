@@ -4,14 +4,18 @@ import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryIn
 /**
  * Mock provider for testing. Returns canned responses.
  * Supports push() — queued messages produce additional results.
+ * Pass `{ autoEnd: true }` to close the stream after the initial result
+ * (no waiting for follow-up pushes — useful for unit tests).
  */
 export class MockProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
 
   private responseFactory: (prompt: string) => string;
+  private autoEnd: boolean;
 
-  constructor(_options: ProviderOptions = {}, responseFactory?: (prompt: string) => string) {
+  constructor(_options: ProviderOptions & { autoEnd?: boolean } = {}, responseFactory?: (prompt: string) => string) {
     this.responseFactory = responseFactory ?? ((prompt) => `Mock response to: ${prompt.slice(0, 100)}`);
+    this.autoEnd = _options.autoEnd ?? false;
   }
 
   isSessionInvalid(_err: unknown): boolean {
@@ -24,6 +28,7 @@ export class MockProvider implements AgentProvider {
     let ended = false;
     let aborted = false;
     const responseFactory = this.responseFactory;
+    const autoEnd = this.autoEnd;
 
     const events: AsyncIterable<ProviderEvent> = {
       async *[Symbol.asyncIterator]() {
@@ -33,6 +38,8 @@ export class MockProvider implements AgentProvider {
         // Process initial prompt
         yield { type: 'activity' };
         yield { type: 'result', text: responseFactory(input.prompt) };
+
+        if (autoEnd) return;
 
         // Process any pushed follow-ups
         while (!ended && !aborted) {

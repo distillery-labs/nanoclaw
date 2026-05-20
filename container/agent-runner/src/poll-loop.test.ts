@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
-import { getPendingMessages, markCompleted } from './db/messages-in.js';
+import { getPendingMessages, getPendingMessagesForSession, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
+import { getTaskContinuation } from './db/session-state.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { MockProvider } from './providers/mock.js';
+import { dispatchTaskSession, type TaskSessionEntry, type PollLoopConfig } from './poll-loop.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -18,14 +20,22 @@ function insertMessage(
   id: string,
   kind: string,
   content: object,
-  opts?: { processAfter?: string; trigger?: 0 | 1; onWake?: 0 | 1 },
+  opts?: { processAfter?: string; trigger?: 0 | 1; onWake?: 0 | 1; taskId?: string | null },
 ) {
   getInboundDb()
     .prepare(
-      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, on_wake, content)
-     VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?)`,
+      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, on_wake, task_id, content)
+     VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?, ?)`,
     )
-    .run(id, kind, opts?.processAfter ?? null, opts?.trigger ?? 1, opts?.onWake ?? 0, JSON.stringify(content));
+    .run(
+      id,
+      kind,
+      opts?.processAfter ?? null,
+      opts?.trigger ?? 1,
+      opts?.onWake ?? 0,
+      opts?.taskId ?? null,
+      JSON.stringify(content),
+    );
 }
 
 describe('formatter', () => {
@@ -373,5 +383,184 @@ describe('end-to-end with mock provider', () => {
     expect(outMessages).toHaveLength(1);
     expect(JSON.parse(outMessages[0].content).text).toBe('The answer is 4');
     expect(outMessages[0].in_reply_to).toBe('m1');
+  });
+});
+
+describe('supervisor — dispatchTaskSession', () => {
+  function makeConfig(responseFactory?: (p: string) => string): PollLoopConfig {
+    return {
+      provider: new MockProvider({ autoEnd: true }, responseFactory ?? (() => 'ok')),
+      providerName: 'mock',
+      cwd: '/tmp',
+    };
+  }
+
+  it('processes task messages end-to-end and marks them completed', async () => {
+    insertMessage('task-msg-1', 'chat', { text: 'run task' }, { taskId: 'task-abc' });
+
+    const taskSessions = new Map<string, TaskSessionEntry>();
+    const config = makeConfig();
+    const messages = getPendingMessagesForSession('task-abc');
+
+    await dispatchTaskSession('task-abc', messages, config, taskSessions);
+    const entry = taskSessions.get('task-abc');
+    if (entry?.queryPromise) await entry.queryPromise;
+
+    // Messages should be marked completed (no longer pending)
+    expect(getPendingMessagesForSession('task-abc')).toHaveLength(0);
+  });
+
+  it('persists task continuation under the task key on init', async () => {
+    insertMessage('task-msg-2', 'chat', { text: 'persist me' }, { taskId: 'task-persist' });
+
+    const taskSessions = new Map<string, TaskSessionEntry>();
+    await dispatchTaskSession('task-persist', getPendingMessagesForSession('task-persist'), makeConfig(), taskSessions);
+    const entry = taskSessions.get('task-persist');
+    if (entry?.queryPromise) await entry.queryPromise;
+
+    expect(getTaskContinuation('task-persist')).toBeDefined();
+    expect(typeof getTaskContinuation('task-persist')).toBe('string');
+  });
+
+  it('skips dispatch when session is already active (queryPromise !== null)', async () => {
+    insertMessage('task-msg-3', 'chat', { text: 'first' }, { taskId: 'task-active' });
+    insertMessage('task-msg-4', 'chat', { text: 'second' }, { taskId: 'task-active' });
+
+    const neverResolves = new Promise<void>(() => {});
+    const taskSessions = new Map<string, TaskSessionEntry>([
+      ['task-active', { taskId: 'task-active', continuation: undefined, queryPromise: neverResolves }],
+    ]);
+
+    const messages = getPendingMessagesForSession('task-active');
+    await dispatchTaskSession('task-active', messages, makeConfig(), taskSessions);
+
+    // Messages should still be pending — no markProcessing was called
+    expect(getPendingMessagesForSession('task-active')).toHaveLength(2);
+  });
+
+  it('uses stored continuation from taskSessions map on reconnect', async () => {
+    insertMessage('task-msg-5', 'chat', { text: 'resume me' }, { taskId: 'task-resume' });
+
+    const capturedInputs: string[] = [];
+    const taskSessions = new Map<string, TaskSessionEntry>([
+      ['task-resume', { taskId: 'task-resume', continuation: 'prior-session-id', queryPromise: null }],
+    ]);
+    const provider = new MockProvider({ autoEnd: true }, (prompt) => {
+      capturedInputs.push(prompt);
+      return 'resumed';
+    });
+    const config = { provider, providerName: 'mock', cwd: '/tmp' };
+
+    const messages = getPendingMessagesForSession('task-resume');
+    await dispatchTaskSession('task-resume', messages, config, taskSessions);
+    const entry = taskSessions.get('task-resume');
+    if (entry?.queryPromise) await entry.queryPromise;
+
+    // Entry should have updated continuation from the mock init event
+    expect(entry?.continuation).toBeDefined();
+    // Prior continuation was loaded (we can verify by checking entry was found, not created fresh)
+    expect(capturedInputs).toHaveLength(1);
+  });
+
+  it('task session isolated from main session messages', async () => {
+    insertMessage('main-msg', 'chat', { text: 'for main' });
+    insertMessage('task-msg', 'chat', { text: 'for task' }, { taskId: 'task-iso' });
+
+    const taskSessions = new Map<string, TaskSessionEntry>();
+    const taskMessages = getPendingMessagesForSession('task-iso');
+
+    await dispatchTaskSession('task-iso', taskMessages, makeConfig(), taskSessions);
+    const entry = taskSessions.get('task-iso');
+    if (entry?.queryPromise) await entry.queryPromise;
+
+    // Task message completed, main message still pending
+    expect(getPendingMessagesForSession('task-iso')).toHaveLength(0);
+    expect(getPendingMessagesForSession(null)).toHaveLength(1);
+    expect(getPendingMessagesForSession(null)[0].id).toBe('main-msg');
+  });
+
+  it('clears queryPromise on completion so subsequent dispatch can start new session', async () => {
+    insertMessage('task-msg-6', 'chat', { text: 'first run' }, { taskId: 'task-rerun' });
+
+    const taskSessions = new Map<string, TaskSessionEntry>();
+    let messages = getPendingMessagesForSession('task-rerun');
+    await dispatchTaskSession('task-rerun', messages, makeConfig(), taskSessions);
+    const entry = taskSessions.get('task-rerun');
+    if (entry?.queryPromise) await entry.queryPromise;
+
+    // queryPromise should be null after completion
+    expect(taskSessions.get('task-rerun')?.queryPromise).toBeNull();
+
+    // Insert a second message and dispatch again — should start fresh session
+    insertMessage('task-msg-7', 'chat', { text: 'second run' }, { taskId: 'task-rerun' });
+    messages = getPendingMessagesForSession('task-rerun');
+    await dispatchTaskSession('task-rerun', messages, makeConfig(), taskSessions);
+    const entry2 = taskSessions.get('task-rerun');
+    if (entry2?.queryPromise) await entry2.queryPromise;
+
+    expect(getPendingMessagesForSession('task-rerun')).toHaveLength(0);
+  });
+});
+
+describe('getPendingMessagesForSession — task_id routing', () => {
+  it('null taskId returns only main-session messages (task_id IS NULL)', () => {
+    insertMessage('main-1', 'chat', { text: 'main' });
+    insertMessage('task-1', 'chat', { text: 'task' }, { taskId: 'uuid-task-a' });
+
+    const main = getPendingMessagesForSession(null);
+    expect(main.map((m) => m.id)).toEqual(['main-1']);
+  });
+
+  it('non-null taskId returns only messages for that task', () => {
+    insertMessage('main-1', 'chat', { text: 'main' });
+    insertMessage('task-a-1', 'chat', { text: 'task a' }, { taskId: 'uuid-task-a' });
+    insertMessage('task-b-1', 'chat', { text: 'task b' }, { taskId: 'uuid-task-b' });
+
+    const taskA = getPendingMessagesForSession('uuid-task-a');
+    expect(taskA.map((m) => m.id)).toEqual(['task-a-1']);
+
+    const taskB = getPendingMessagesForSession('uuid-task-b');
+    expect(taskB.map((m) => m.id)).toEqual(['task-b-1']);
+  });
+
+  it('two task sessions are completely isolated from each other', () => {
+    insertMessage('ta-1', 'chat', { text: 'a1' }, { taskId: 'task-alpha' });
+    insertMessage('ta-2', 'chat', { text: 'a2' }, { taskId: 'task-alpha' });
+    insertMessage('tb-1', 'chat', { text: 'b1' }, { taskId: 'task-beta' });
+
+    const alpha = getPendingMessagesForSession('task-alpha');
+    const beta = getPendingMessagesForSession('task-beta');
+    const main = getPendingMessagesForSession(null);
+
+    expect(alpha.map((m) => m.id).sort()).toEqual(['ta-1', 'ta-2']);
+    expect(beta.map((m) => m.id)).toEqual(['tb-1']);
+    expect(main).toHaveLength(0);
+  });
+
+  it('accumulate (trigger=0) messages respect task routing', () => {
+    insertMessage('main-ctx', 'chat', { text: 'ctx' }, { trigger: 0 });
+    insertMessage('task-ctx', 'chat', { text: 'ctx' }, { trigger: 0, taskId: 'uuid-task-a' });
+    insertMessage('task-wake', 'chat', { text: 'wake' }, { trigger: 1, taskId: 'uuid-task-a' });
+
+    const taskA = getPendingMessagesForSession('uuid-task-a');
+    const mainSess = getPendingMessagesForSession(null);
+
+    expect(taskA.map((m) => m.id).sort()).toEqual(['task-ctx', 'task-wake']);
+    expect(mainSess.map((m) => m.id)).toEqual(['main-ctx']);
+  });
+
+  it('already-acked messages are excluded per-session', () => {
+    insertMessage('m1', 'chat', { text: 'hi' }, { taskId: 'task-x' });
+    markCompleted(['m1']);
+    expect(getPendingMessagesForSession('task-x')).toHaveLength(0);
+  });
+
+  it('returns messages in chronological order (oldest first)', () => {
+    insertMessage('t1', 'chat', { text: 'first' }, { taskId: 'task-z' });
+    insertMessage('t2', 'chat', { text: 'second' }, { taskId: 'task-z' });
+    insertMessage('t3', 'chat', { text: 'third' }, { taskId: 'task-z' });
+
+    const msgs = getPendingMessagesForSession('task-z');
+    expect(msgs.map((m) => m.id)).toEqual(['t1', 't2', 't3']);
   });
 });
