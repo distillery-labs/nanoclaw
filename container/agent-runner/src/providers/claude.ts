@@ -4,6 +4,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import * as distill from '../distill-tasks.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -188,6 +189,44 @@ const postToolUseHook: HookCallback = async () => {
   return { continue: true };
 };
 
+// ── Distill task capture hooks ──
+// Fires on Agent-tool spawns (SDK name: Task), create_agent, and schedule_task.
+// All distill operations are best-effort — errors are logged, never surface to
+// the agent. See distill-tasks.ts for the exclusion rationale.
+
+const DISTILL_TRACKED = new Set([
+  'Task', // Claude Agent SDK sub-agent spawn (shown as "Agent" in system prompt)
+  'mcp__nanoclaw__create_agent',
+  'mcp__nanoclaw__schedule_task',
+]);
+
+const distillPreToolUseHook: HookCallback = async (input) => {
+  const i = input as { tool_name?: string; tool_input?: unknown; tool_use_id?: string };
+  if (!DISTILL_TRACKED.has(i.tool_name ?? '')) return { continue: true };
+  await distill
+    .recordToolStart(i.tool_use_id ?? i.tool_name ?? 'unknown', i.tool_name ?? '', i.tool_input)
+    .catch((err) => log(`distillPre: ${err instanceof Error ? err.message : String(err)}`));
+  return { continue: true };
+};
+
+const distillPostToolUseHook: HookCallback = async (input) => {
+  const i = input as { tool_name?: string; tool_response?: unknown; tool_use_id?: string };
+  if (!DISTILL_TRACKED.has(i.tool_name ?? '')) return { continue: true };
+  await distill
+    .recordToolEnd(i.tool_use_id ?? i.tool_name ?? 'unknown', i.tool_response, 'completed')
+    .catch((err) => log(`distillPost: ${err instanceof Error ? err.message : String(err)}`));
+  return { continue: true };
+};
+
+const distillPostToolUseFailureHook: HookCallback = async (input) => {
+  const i = input as { tool_name?: string; tool_response?: unknown; tool_use_id?: string };
+  if (!DISTILL_TRACKED.has(i.tool_name ?? '')) return { continue: true };
+  await distill
+    .recordToolEnd(i.tool_use_id ?? i.tool_name ?? 'unknown', i.tool_response, 'failed')
+    .catch((err) => log(`distillPostFail: ${err instanceof Error ? err.message : String(err)}`));
+  return { continue: true };
+};
+
 function createPreCompactHook(assistantName?: string): HookCallback {
   return async (input) => {
     const preCompact = input as PreCompactHookInput;
@@ -305,9 +344,9 @@ export class ClaudeProvider implements AgentProvider {
         settingSources: ['project', 'user'],
         mcpServers: this.mcpServers,
         hooks: {
-          PreToolUse: [{ hooks: [preToolUseHook] }],
-          PostToolUse: [{ hooks: [postToolUseHook] }],
-          PostToolUseFailure: [{ hooks: [postToolUseHook] }],
+          PreToolUse: [{ hooks: [preToolUseHook, distillPreToolUseHook] }],
+          PostToolUse: [{ hooks: [postToolUseHook, distillPostToolUseHook] }],
+          PostToolUseFailure: [{ hooks: [postToolUseHook, distillPostToolUseFailureHook] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
         },
       },

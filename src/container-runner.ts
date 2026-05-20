@@ -411,6 +411,17 @@ async function buildContainerArgs(
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
 
+  // Distill task capture — forwarded only when the operator has set all three
+  // vars. Absent ⟹ distill-tasks.ts silently no-ops; containers spawn normally.
+  const distillUrl = process.env.DISTILL_SUPABASE_URL;
+  const distillKey = process.env.DISTILL_SUPABASE_SERVICE_KEY;
+  const distillProject = process.env.DISTILL_PROJECT_ID;
+  if (distillUrl && distillKey && distillProject) {
+    args.push('-e', `DISTILL_SUPABASE_URL=${distillUrl}`);
+    args.push('-e', `DISTILL_SUPABASE_SERVICE_KEY=${distillKey}`);
+    args.push('-e', `DISTILL_PROJECT_ID=${distillProject}`);
+  }
+
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
     for (const [key, value] of Object.entries(providerContribution.env)) {
