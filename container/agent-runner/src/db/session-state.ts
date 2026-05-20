@@ -77,3 +77,42 @@ export function setContinuation(providerName: string, id: string): void {
 export function clearContinuation(providerName: string): void {
   deleteValue(continuationKey(providerName));
 }
+
+// ── Task session continuations ──
+// Maps a Distill task_id to its SDK session_id so task sessions survive
+// container restarts. Keyed separately from provider continuations so the two
+// namespaces never collide and getAllTaskContinuations() can bulk-load on startup.
+
+const TASK_CONTINUATION_PREFIX = 'task_continuation:';
+
+function taskContinuationKey(taskId: string): string {
+  return `${TASK_CONTINUATION_PREFIX}${taskId}`;
+}
+
+export function getTaskContinuation(taskId: string): string | undefined {
+  return getValue(taskContinuationKey(taskId));
+}
+
+export function setTaskContinuation(taskId: string, sessionId: string): void {
+  setValue(taskContinuationKey(taskId), sessionId);
+}
+
+export function clearTaskContinuation(taskId: string): void {
+  deleteValue(taskContinuationKey(taskId));
+}
+
+/**
+ * Load all persisted task_id → session_id entries at container startup.
+ * Used by the supervisor to resume any task sessions that were active when
+ * the container last exited.
+ */
+export function getAllTaskContinuations(): Map<string, string> {
+  const rows = getOutboundDb()
+    .prepare('SELECT key, value FROM session_state WHERE key LIKE ?')
+    .all(`${TASK_CONTINUATION_PREFIX}%`) as Array<{ key: string; value: string }>;
+  const result = new Map<string, string>();
+  for (const row of rows) {
+    result.set(row.key.slice(TASK_CONTINUATION_PREFIX.length), row.value);
+  }
+  return result;
+}
