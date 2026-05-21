@@ -467,7 +467,7 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { hasUnwrapped } = dispatchResultText(event.text, routing);
+          const { hasUnwrapped } = dispatchResultText(event.text, routing, taskId);
           if (hasUnwrapped && !unwrappedNudged) {
             unwrappedNudged = true;
             const destinations = getAllDestinations();
@@ -517,7 +517,11 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * The agent must always wrap output in <message to="name">...</message>
  * blocks, even with a single destination. Bare text is scratchpad only.
  */
-function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
+function dispatchResultText(
+  text: string,
+  routing: RoutingContext,
+  taskId: string | null = null,
+): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
@@ -539,7 +543,7 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
-    sendToDestination(dest, body, routing);
+    sendToDestination(dest, body, routing, taskId);
     sent++;
   }
   if (lastIndex < text.length) {
@@ -559,7 +563,12 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
   return { sent, hasUnwrapped };
 }
 
-function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
+function sendToDestination(
+  dest: DestinationEntry,
+  body: string,
+  routing: RoutingContext,
+  taskId: string | null = null,
+): void {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
   // Resolve thread_id per-destination from the most recent inbound message
@@ -575,6 +584,7 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
     channel_type: channelType,
     thread_id: destRouting?.threadId ?? null,
     content: JSON.stringify({ text: body }),
+    task_id: taskId,
   });
 }
 
