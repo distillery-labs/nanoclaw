@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
-import { getPendingMessages, markCompleted } from './db/messages-in.js';
+import { getPendingMessages, getPendingMessagesForSession, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { MockProvider } from './providers/mock.js';
@@ -18,14 +18,22 @@ function insertMessage(
   id: string,
   kind: string,
   content: object,
-  opts?: { processAfter?: string; trigger?: 0 | 1; onWake?: 0 | 1 },
+  opts?: { processAfter?: string; trigger?: 0 | 1; onWake?: 0 | 1; taskId?: string | null },
 ) {
   getInboundDb()
     .prepare(
-      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, on_wake, content)
-     VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?)`,
+      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, on_wake, task_id, content)
+     VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?, ?)`,
     )
-    .run(id, kind, opts?.processAfter ?? null, opts?.trigger ?? 1, opts?.onWake ?? 0, JSON.stringify(content));
+    .run(
+      id,
+      kind,
+      opts?.processAfter ?? null,
+      opts?.trigger ?? 1,
+      opts?.onWake ?? 0,
+      opts?.taskId ?? null,
+      JSON.stringify(content),
+    );
 }
 
 describe('formatter', () => {
@@ -373,5 +381,68 @@ describe('end-to-end with mock provider', () => {
     expect(outMessages).toHaveLength(1);
     expect(JSON.parse(outMessages[0].content).text).toBe('The answer is 4');
     expect(outMessages[0].in_reply_to).toBe('m1');
+  });
+});
+
+describe('getPendingMessagesForSession — task_id routing', () => {
+  it('null taskId returns only main-session messages (task_id IS NULL)', () => {
+    insertMessage('main-1', 'chat', { text: 'main' });
+    insertMessage('task-1', 'chat', { text: 'task' }, { taskId: 'uuid-task-a' });
+
+    const main = getPendingMessagesForSession(null);
+    expect(main.map((m) => m.id)).toEqual(['main-1']);
+  });
+
+  it('non-null taskId returns only messages for that task', () => {
+    insertMessage('main-1', 'chat', { text: 'main' });
+    insertMessage('task-a-1', 'chat', { text: 'task a' }, { taskId: 'uuid-task-a' });
+    insertMessage('task-b-1', 'chat', { text: 'task b' }, { taskId: 'uuid-task-b' });
+
+    const taskA = getPendingMessagesForSession('uuid-task-a');
+    expect(taskA.map((m) => m.id)).toEqual(['task-a-1']);
+
+    const taskB = getPendingMessagesForSession('uuid-task-b');
+    expect(taskB.map((m) => m.id)).toEqual(['task-b-1']);
+  });
+
+  it('two task sessions are completely isolated from each other', () => {
+    insertMessage('ta-1', 'chat', { text: 'a1' }, { taskId: 'task-alpha' });
+    insertMessage('ta-2', 'chat', { text: 'a2' }, { taskId: 'task-alpha' });
+    insertMessage('tb-1', 'chat', { text: 'b1' }, { taskId: 'task-beta' });
+
+    const alpha = getPendingMessagesForSession('task-alpha');
+    const beta = getPendingMessagesForSession('task-beta');
+    const main = getPendingMessagesForSession(null);
+
+    expect(alpha.map((m) => m.id).sort()).toEqual(['ta-1', 'ta-2']);
+    expect(beta.map((m) => m.id)).toEqual(['tb-1']);
+    expect(main).toHaveLength(0);
+  });
+
+  it('accumulate (trigger=0) messages respect task routing', () => {
+    insertMessage('main-ctx', 'chat', { text: 'ctx' }, { trigger: 0 });
+    insertMessage('task-ctx', 'chat', { text: 'ctx' }, { trigger: 0, taskId: 'uuid-task-a' });
+    insertMessage('task-wake', 'chat', { text: 'wake' }, { trigger: 1, taskId: 'uuid-task-a' });
+
+    const taskA = getPendingMessagesForSession('uuid-task-a');
+    const mainSess = getPendingMessagesForSession(null);
+
+    expect(taskA.map((m) => m.id).sort()).toEqual(['task-ctx', 'task-wake']);
+    expect(mainSess.map((m) => m.id)).toEqual(['main-ctx']);
+  });
+
+  it('already-acked messages are excluded per-session', () => {
+    insertMessage('m1', 'chat', { text: 'hi' }, { taskId: 'task-x' });
+    markCompleted(['m1']);
+    expect(getPendingMessagesForSession('task-x')).toHaveLength(0);
+  });
+
+  it('returns messages in chronological order (oldest first)', () => {
+    insertMessage('t1', 'chat', { text: 'first' }, { taskId: 'task-z' });
+    insertMessage('t2', 'chat', { text: 'second' }, { taskId: 'task-z' });
+    insertMessage('t3', 'chat', { text: 'third' }, { taskId: 'task-z' });
+
+    const msgs = getPendingMessagesForSession('task-z');
+    expect(msgs.map((m) => m.id)).toEqual(['t1', 't2', 't3']);
   });
 });
