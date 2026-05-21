@@ -135,6 +135,19 @@ function setupLaunchd(
   );
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
 
+  // Launchd has no ExecStartPre equivalent, so we use a wrapper script that
+  // runs the staleness check then exec's node. Generated at setup time so
+  // nodePath is baked in; regenerated on every setup run.
+  const startScriptPath = path.join(projectRoot, 'scripts', 'start.sh');
+  const startScript = [
+    '#!/bin/bash',
+    'set -euo pipefail',
+    `"${projectRoot}/container/maybe-rebuild.sh"`,
+    `exec "${nodePath}" "${projectRoot}/dist/index.js"`,
+  ].join('\n') + '\n';
+  fs.writeFileSync(startScriptPath, startScript, { mode: 0o755 });
+  log.info('Wrote launchd start wrapper', { startScriptPath });
+
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -143,8 +156,8 @@ function setupLaunchd(
     <string>${label}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${nodePath}</string>
-        <string>${projectRoot}/dist/index.js</string>
+        <string>/bin/bash</string>
+        <string>${startScriptPath}</string>
     </array>
     <key>WorkingDirectory</key>
     <string>${projectRoot}</string>
@@ -313,6 +326,7 @@ After=network.target
 
 [Service]
 Type=simple
+ExecStartPre=${projectRoot}/container/maybe-rebuild.sh
 ExecStart=${nodePath} ${projectRoot}/dist/index.js
 WorkingDirectory=${projectRoot}
 Restart=always
@@ -451,6 +465,9 @@ function setupNohupFallback(
     '    sleep 2',
     '  fi',
     'fi',
+    '',
+    '# Rebuild container image if source has changed since last build',
+    `"${projectRoot}/container/maybe-rebuild.sh"`,
     '',
     'echo "Starting NanoClaw..."',
     `nohup ${JSON.stringify(nodePath)} ${JSON.stringify(projectRoot + '/dist/index.js')} \\`,
