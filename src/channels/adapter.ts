@@ -60,6 +60,8 @@ export interface InboundEvent {
     isGroup?: boolean;
   };
   replyTo?: DeliveryAddress;
+  /** Sub-Skippy multiplex: route to a named Distill task session rather than the main session. */
+  taskId?: string | null;
 }
 
 /** Inbound message from adapter to host. */
