@@ -34,6 +34,7 @@ import {
   upsertSessionRouting,
   insertMessage,
   migrateMessagesInTable,
+  migrateMessagesOutTable,
 } from './db/session-db.js';
 import { log } from './log.js';
 import type { Session } from './types.js';
@@ -376,7 +377,9 @@ export function openOutboundDb(agentGroupId: string, sessionId: string): Databas
 
 /** Open the outbound DB for a session with write access. Only safe to call when no container is running. */
 export function openOutboundDbRw(agentGroupId: string, sessionId: string): Database.Database {
-  return openOutboundDbRwRaw(outboundDbPath(agentGroupId, sessionId));
+  const db = openOutboundDbRwRaw(outboundDbPath(agentGroupId, sessionId));
+  migrateMessagesOutTable(db);
+  return db;
 }
 
 /**

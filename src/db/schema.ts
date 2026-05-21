@@ -233,7 +233,9 @@ CREATE TABLE IF NOT EXISTS messages_out (
   platform_id    TEXT,
   channel_type   TEXT,
   thread_id      TEXT,
-  content        TEXT NOT NULL
+  content        TEXT NOT NULL,
+  task_id        TEXT
+               -- Sub-Skippy multiplex: NULL = main session, UUID = Distill task session.
 );
 
 -- Container tracks processing status here instead of updating messages_in.
