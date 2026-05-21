@@ -25,6 +25,12 @@ groups/*
 .env
 .env*
 
+# Container build staleness marker (written by container/maybe-rebuild.sh)
+.container-build-hash
+
+# Generated launchd start wrapper (written by setup/service.ts setupLaunchd)
+scripts/start.sh
+
 # Temp files
 .tmp-*
 
