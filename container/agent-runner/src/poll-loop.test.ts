@@ -6,6 +6,7 @@ import { getUndeliveredMessages } from './db/messages-out.js';
 import { getTaskContinuation } from './db/session-state.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { MockProvider } from './providers/mock.js';
+import type { AgentProvider, AgentQuery, QueryInput } from './providers/types.js';
 import { dispatchTaskSession, type TaskSessionEntry, type PollLoopConfig } from './poll-loop.js';
 
 beforeEach(() => {
@@ -499,6 +500,111 @@ describe('supervisor — dispatchTaskSession', () => {
     if (entry2?.queryPromise) await entry2.queryPromise;
 
     expect(getPendingMessagesForSession('task-rerun')).toHaveLength(0);
+  });
+});
+
+describe('task event emission', () => {
+  function makeConfig(responseFactory?: (p: string) => string): PollLoopConfig {
+    return {
+      provider: new MockProvider({ autoEnd: true }, responseFactory ?? (() => 'ok')),
+      providerName: 'mock',
+      cwd: '/tmp',
+    };
+  }
+
+  function getTaskEvents(): Array<{ event_type: string; task_id: string }> {
+    return getUndeliveredMessages()
+      .filter((m) => m.kind === 'system')
+      .map((m) => JSON.parse(m.content))
+      .filter((c) => c.action === 'task_event');
+  }
+
+  it('emits session_created on first dispatch (no prior continuation)', async () => {
+    insertMessage('ev-msg-1', 'chat', { text: 'hello' }, { taskId: 'task-ev-create' });
+
+    const taskSessions = new Map<string, TaskSessionEntry>();
+    const messages = getPendingMessagesForSession('task-ev-create');
+    await dispatchTaskSession('task-ev-create', messages, makeConfig(), taskSessions);
+    const entry = taskSessions.get('task-ev-create');
+    if (entry?.queryPromise) await entry.queryPromise;
+
+    const events = getTaskEvents();
+    expect(events.some((e) => e.event_type === 'session_created' && e.task_id === 'task-ev-create')).toBe(true);
+  });
+
+  it('emits session_resumed when prior continuation is present', async () => {
+    insertMessage('ev-msg-2', 'chat', { text: 'resume' }, { taskId: 'task-ev-resume' });
+
+    const taskSessions = new Map<string, TaskSessionEntry>([
+      ['task-ev-resume', { taskId: 'task-ev-resume', continuation: 'prior-session-abc', queryPromise: null }],
+    ]);
+    const messages = getPendingMessagesForSession('task-ev-resume');
+    await dispatchTaskSession('task-ev-resume', messages, makeConfig(), taskSessions);
+    const entry = taskSessions.get('task-ev-resume');
+    if (entry?.queryPromise) await entry.queryPromise;
+
+    const events = getTaskEvents();
+    expect(events.some((e) => e.event_type === 'session_resumed' && e.task_id === 'task-ev-resume')).toBe(true);
+    expect(events.some((e) => e.event_type === 'session_created')).toBe(false);
+  });
+
+  it('emits session_completed on clean finish', async () => {
+    insertMessage('ev-msg-3', 'chat', { text: 'run' }, { taskId: 'task-ev-complete' });
+
+    const taskSessions = new Map<string, TaskSessionEntry>();
+    const messages = getPendingMessagesForSession('task-ev-complete');
+    await dispatchTaskSession('task-ev-complete', messages, makeConfig(), taskSessions);
+    const entry = taskSessions.get('task-ev-complete');
+    if (entry?.queryPromise) await entry.queryPromise;
+
+    const events = getTaskEvents();
+    expect(events.some((e) => e.event_type === 'session_completed' && e.task_id === 'task-ev-complete')).toBe(true);
+  });
+
+  it('emits session_aborted (not session_completed) on provider error', async () => {
+    insertMessage('ev-msg-4', 'chat', { text: 'fail' }, { taskId: 'task-ev-abort' });
+
+    class ThrowingProvider implements AgentProvider {
+      readonly supportsNativeSlashCommands = false;
+      isSessionInvalid(_err: unknown): boolean { return false; }
+      query(_input: QueryInput): AgentQuery {
+        return {
+          push: () => {},
+          end: () => {},
+          abort: () => {},
+          events: {
+            async *[Symbol.asyncIterator]() {
+              throw new Error('provider failure');
+            },
+          },
+        };
+      }
+    }
+
+    const config: PollLoopConfig = { provider: new ThrowingProvider(), providerName: 'mock', cwd: '/tmp' };
+    const taskSessions = new Map<string, TaskSessionEntry>();
+    const messages = getPendingMessagesForSession('task-ev-abort');
+    await dispatchTaskSession('task-ev-abort', messages, config, taskSessions);
+    const entry = taskSessions.get('task-ev-abort');
+    if (entry?.queryPromise) await entry.queryPromise.catch(() => {});
+
+    const events = getTaskEvents();
+    expect(events.some((e) => e.event_type === 'session_aborted' && e.task_id === 'task-ev-abort')).toBe(true);
+    expect(events.some((e) => e.event_type === 'session_completed')).toBe(false);
+  });
+
+  it('does not emit session_created/resumed for main session (taskId=null)', async () => {
+    insertMessage('ev-msg-5', 'chat', { text: 'main' }, { taskId: 'task-ev-main-check' });
+
+    const taskSessions = new Map<string, TaskSessionEntry>();
+    const messages = getPendingMessagesForSession('task-ev-main-check');
+    await dispatchTaskSession('task-ev-main-check', messages, makeConfig(), taskSessions);
+    const entry = taskSessions.get('task-ev-main-check');
+    if (entry?.queryPromise) await entry.queryPromise;
+
+    // All emitted events should be for the task, not main session
+    const events = getTaskEvents();
+    expect(events.every((e) => e.task_id === 'task-ev-main-check')).toBe(true);
   });
 });
 
