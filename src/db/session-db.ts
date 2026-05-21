@@ -362,6 +362,10 @@ export function migrateMessagesInTable(db: Database.Database): void {
     // All existing rows are normal messages, so default 0.
     db.prepare('ALTER TABLE messages_in ADD COLUMN on_wake INTEGER NOT NULL DEFAULT 0').run();
   }
+  if (!cols.has('task_id')) {
+    // Sub-Skippy multiplex: NULL = main session, UUID = named Distill task session.
+    db.prepare('ALTER TABLE messages_in ADD COLUMN task_id TEXT').run();
+  }
 }
 
 /**
