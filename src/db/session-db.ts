@@ -286,6 +286,8 @@ export interface OutboundMessage {
   thread_id: string | null;
   content: string;
   in_reply_to: string | null;
+  /** Sub-Skippy multiplex: NULL = main session, UUID = Distill task session. */
+  task_id: string | null;
 }
 
 export function getDueOutboundMessages(db: Database.Database): OutboundMessage[] {
@@ -365,6 +367,19 @@ export function migrateMessagesInTable(db: Database.Database): void {
   if (!cols.has('task_id')) {
     // Sub-Skippy multiplex: NULL = main session, UUID = named Distill task session.
     db.prepare('ALTER TABLE messages_in ADD COLUMN task_id TEXT').run();
+  }
+}
+
+// Adds columns added to messages_out after the initial v2 schema to
+// pre-existing session DBs. Requires write access — call via openOutboundDbRw.
+// No-op on fresh installs where the columns are in the baseline schema.
+export function migrateMessagesOutTable(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info('messages_out')").all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  if (!cols.has('task_id')) {
+    // Sub-Skippy multiplex: NULL = main session, UUID = named Distill task session.
+    db.prepare('ALTER TABLE messages_out ADD COLUMN task_id TEXT').run();
   }
 }
 

@@ -240,6 +240,7 @@ async function deliverMessage(
     thread_id: string | null;
     content: string;
     in_reply_to: string | null;
+    task_id: string | null;
   },
   session: Session,
   inDb: Database.Database,
