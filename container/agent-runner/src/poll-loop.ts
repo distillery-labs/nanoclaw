@@ -1,8 +1,8 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
-import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
+import { getPendingMessages, getPendingMessagesForSession, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
-import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
+import { clearContinuation, migrateLegacyContinuation, setContinuation, getAllTaskContinuations, setTaskContinuation, clearTaskContinuation } from './db/session-state.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import {
   formatMessages,
@@ -40,6 +40,13 @@ export interface PollLoopConfig {
   };
 }
 
+/** @internal — exported for testing only */
+export interface TaskSessionEntry {
+  taskId: string;
+  continuation: string | undefined;
+  queryPromise: Promise<void> | null;
+}
+
 /**
  * Main poll loop. Runs indefinitely until the process is killed.
  *
@@ -60,6 +67,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
   if (continuation) {
     log(`Resuming agent session ${continuation}`);
+  }
+
+  // Restore task sessions from persisted continuations (crash recovery).
+  const taskSessions = new Map<string, TaskSessionEntry>();
+  for (const [tid, sessionId] of getAllTaskContinuations()) {
+    taskSessions.set(tid, { taskId: tid, continuation: sessionId, queryPromise: null });
+    log(`Restored task session continuation for ${tid}`);
   }
 
   // Clear leftover 'processing' acks from a previous crashed container.
@@ -97,10 +111,31 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
-    const ids = messages.map((m) => m.id);
+    // Split by task_id: null → main session, non-null → task sessions.
+    const mainMessages = messages.filter((m) => m.task_id === null);
+    const taskMessagesByTaskId = new Map<string, MessageInRow[]>();
+    for (const msg of messages) {
+      if (msg.task_id !== null) {
+        const group = taskMessagesByTaskId.get(msg.task_id) ?? [];
+        group.push(msg);
+        taskMessagesByTaskId.set(msg.task_id, group);
+      }
+    }
+
+    // Dispatch task sessions non-blocking — each runs its own internal poller.
+    for (const [taskId, taskBatch] of taskMessagesByTaskId) {
+      void dispatchTaskSession(taskId, taskBatch, config, taskSessions);
+    }
+
+    // No main-session messages this iteration — task sessions handle their own.
+    if (mainMessages.length === 0) {
+      continue;
+    }
+
+    const ids = mainMessages.map((m) => m.id);
     markProcessing(ids);
 
-    const routing = extractRouting(messages);
+    const routing = extractRouting(mainMessages);
 
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command
@@ -108,7 +143,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const normalMessages: MessageInRow[] = [];
     const commandIds: string[] = [];
 
-    for (const msg of messages) {
+    for (const msg of mainMessages) {
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
         log('Clearing session (resetting continuation)');
         continuation = undefined;
@@ -134,7 +169,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     if (normalMessages.length === 0) {
       const remainingIds = ids.filter((id) => !commandIds.includes(id));
       if (remainingIds.length > 0) markCompleted(remainingIds);
-      log(`All ${messages.length} message(s) were commands, skipping query`);
+      log(`All ${mainMessages.length} message(s) were commands, skipping query`);
       continue;
     }
 
@@ -181,7 +216,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(query, routing, processingIds, config.providerName, null);
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -262,6 +297,7 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  taskId: string | null = null,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -284,7 +320,7 @@ async function processQuery(
 
     void (async () => {
       try {
-        const pending = getPendingMessages();
+        const pending = getPendingMessagesForSession(taskId);
 
         // Slash commands need a fresh query: /clear resets the SDK's
         // resume id (fixed at sdkQuery() time); admin/passthrough commands
@@ -293,7 +329,7 @@ async function processQuery(
         // the SDK never runs them. End the stream and leave the rows
         // pending; the outer loop handles them on next iteration via the
         // canonical command path + formatMessagesWithCommands.
-        if (pending.some((m) => isRunnerCommand(m))) {
+        if (taskId === null && pending.some((m) => isRunnerCommand(m))) {
           log('Pending slash command — ending stream so outer loop can process');
           endedForCommand = true;
           query.end();
@@ -368,7 +404,11 @@ async function processQuery(
         // container died between `init` and `result`, the SDK session was
         // effectively orphaned and the next message started a blank
         // Claude session with no prior context.
-        setContinuation(providerName, event.continuation);
+        if (taskId === null) {
+          setContinuation(providerName, event.continuation);
+        } else {
+          setTaskContinuation(taskId, event.continuation);
+        }
       } else if (event.type === 'result') {
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
@@ -511,6 +551,75 @@ function resolveDestinationThread(
     log(`resolveDestinationThread error: ${err instanceof Error ? err.message : String(err)}`);
   }
   return null;
+}
+
+/** @internal — exported for testing only */
+export async function dispatchTaskSession(
+  taskId: string,
+  messages: MessageInRow[],
+  config: PollLoopConfig,
+  taskSessions: Map<string, TaskSessionEntry>,
+): Promise<void> {
+  const entry = taskSessions.get(taskId);
+
+  if (entry?.queryPromise !== null && entry?.queryPromise !== undefined) {
+    // Session is already active — the internal poller inside processQuery
+    // will pick up these messages via getPendingMessagesForSession(taskId).
+    return;
+  }
+
+  const normalMessages = messages.filter((m) => m.kind !== 'system');
+  if (normalMessages.length === 0) return;
+
+  const ids = messages.map((m) => m.id);
+  markProcessing(ids);
+
+  const routing = extractRouting(normalMessages);
+  const prompt = formatMessages(normalMessages);
+
+  log(`Starting task session ${taskId} (${normalMessages.length} message(s))`);
+
+  const currentEntry: TaskSessionEntry = entry ?? { taskId, continuation: undefined, queryPromise: null };
+  if (!entry) taskSessions.set(taskId, currentEntry);
+
+  const query = config.provider.query({
+    prompt,
+    continuation: currentEntry.continuation,
+    cwd: config.cwd,
+    systemContext: config.systemContext,
+  });
+
+  const queryPromise = processQuery(query, routing, ids, config.providerName, taskId)
+    .then((result) => {
+      if (result.continuation) {
+        currentEntry.continuation = result.continuation;
+      }
+    })
+    .catch((err) => {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log(`Task session ${taskId} error: ${errMsg}`);
+      if (currentEntry.continuation && config.provider.isSessionInvalid(err)) {
+        log(`Stale task session (${taskId}) — clearing continuation`);
+        currentEntry.continuation = undefined;
+        clearTaskContinuation(taskId);
+      }
+      writeMessageOut({
+        id: generateId(),
+        kind: 'chat',
+        platform_id: routing.platformId,
+        channel_type: routing.channelType,
+        thread_id: routing.threadId,
+        content: JSON.stringify({ text: `Task session error: ${errMsg}` }),
+        task_id: taskId,
+      });
+    })
+    .finally(() => {
+      currentEntry.queryPromise = null;
+      markCompleted(ids);
+      log(`Task session ${taskId} completed`);
+    });
+
+  currentEntry.queryPromise = queryPromise;
 }
 
 function sleep(ms: number): Promise<void> {
