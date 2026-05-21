@@ -28,8 +28,15 @@ export type WebhookInboundHandler = (
   headers: Record<string, string>,
 ) => Promise<{ status: number; body: string; contentType?: string }>;
 
+/** Handler registered by the Distill module for POST /v1/a2a/inject */
+export type A2aInjectHandler = (
+  rawBody: Buffer,
+  headers: Record<string, string>,
+) => Promise<{ status: number; body: string }>;
+
 const routes = new Map<string, WebhookEntry>();
 let webhookInboundHandler: WebhookInboundHandler | null = null;
+let a2aInjectHandler: A2aInjectHandler | null = null;
 let server: http.Server | null = null;
 
 /** Convert Node.js IncomingMessage to a Web API Request. */
@@ -95,6 +102,15 @@ export function registerWebhookInboundRoute(handler: WebhookInboundHandler): voi
   log.info('Webhook inbound route registered', { path: '/v1/inbound/webhook/:mgId' });
 }
 
+/**
+ * Register the Distill a2a inject handler for POST /v1/a2a/inject.
+ * Called by the Distill module on startup.
+ */
+export function registerA2aInjectRoute(handler: A2aInjectHandler): void {
+  a2aInjectHandler = handler;
+  ensureServer();
+}
+
 function ensureServer(): void {
   if (server) return;
 
@@ -133,6 +149,38 @@ function ensureServer(): void {
         res.end(result.body);
       } catch (err) {
         log.error('Webhook inbound handler error', { mgId, err });
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Internal Server Error');
+      }
+      return;
+    }
+
+    // Route: POST /v1/a2a/inject
+    if (url === '/v1/a2a/inject' || url.startsWith('/v1/a2a/inject?')) {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'Content-Type': 'text/plain' });
+        res.end('Method Not Allowed');
+        return;
+      }
+      if (!a2aInjectHandler) {
+        res.writeHead(503, { 'Content-Type': 'text/plain' });
+        res.end('A2a inject handler not registered');
+        return;
+      }
+      const injectChunks: Buffer[] = [];
+      for await (const chunk of req) injectChunks.push(chunk as Buffer);
+      const injectBody = Buffer.concat(injectChunks);
+      const injectHeaders: Record<string, string> = {};
+      for (const [key, val] of Object.entries(req.headers)) {
+        if (typeof val === 'string') injectHeaders[key.toLowerCase()] = val;
+        else if (Array.isArray(val)) injectHeaders[key.toLowerCase()] = val.join(', ');
+      }
+      try {
+        const result = await a2aInjectHandler(injectBody, injectHeaders);
+        res.writeHead(result.status, { 'Content-Type': 'text/plain' });
+        res.end(result.body);
+      } catch (err) {
+        log.error('A2a inject handler error', { err });
         res.writeHead(500, { 'Content-Type': 'text/plain' });
         res.end('Internal Server Error');
       }
