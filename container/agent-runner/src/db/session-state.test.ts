@@ -6,6 +6,10 @@ import {
   getContinuation,
   migrateLegacyContinuation,
   setContinuation,
+  clearTaskContinuation,
+  getAllTaskContinuations,
+  getTaskContinuation,
+  setTaskContinuation,
 } from './session-state.js';
 
 beforeEach(() => {
@@ -96,5 +100,74 @@ describe('session-state — legacy migration', () => {
 
     const second = migrateLegacyContinuation('claude');
     expect(second).toBe('once');
+  });
+});
+
+describe('session-state — task session continuations', () => {
+  test('set/get round-trip', () => {
+    setTaskContinuation('task-uuid-1', 'sdk-session-abc');
+    expect(getTaskContinuation('task-uuid-1')).toBe('sdk-session-abc');
+  });
+
+  test('unknown task_id returns undefined', () => {
+    expect(getTaskContinuation('never-seen')).toBeUndefined();
+  });
+
+  test('clearTaskContinuation removes only the target entry', () => {
+    setTaskContinuation('task-a', 'session-a');
+    setTaskContinuation('task-b', 'session-b');
+
+    clearTaskContinuation('task-a');
+
+    expect(getTaskContinuation('task-a')).toBeUndefined();
+    expect(getTaskContinuation('task-b')).toBe('session-b');
+  });
+
+  test('getAllTaskContinuations returns empty Map on fresh DB', () => {
+    expect(getAllTaskContinuations().size).toBe(0);
+  });
+
+  test('getAllTaskContinuations returns all task entries', () => {
+    setTaskContinuation('task-1', 'sdk-1');
+    setTaskContinuation('task-2', 'sdk-2');
+    setTaskContinuation('task-3', 'sdk-3');
+
+    const map = getAllTaskContinuations();
+    expect(map.size).toBe(3);
+    expect(map.get('task-1')).toBe('sdk-1');
+    expect(map.get('task-2')).toBe('sdk-2');
+    expect(map.get('task-3')).toBe('sdk-3');
+  });
+
+  test('getAllTaskContinuations excludes provider continuation keys', () => {
+    setContinuation('claude', 'claude-session-xyz');
+    setTaskContinuation('task-1', 'sdk-1');
+
+    const map = getAllTaskContinuations();
+    expect(map.size).toBe(1);
+    expect(map.has('task-1')).toBe(true);
+    // Provider key must not bleed into the task map
+    expect([...map.keys()].some((k) => k.includes('claude'))).toBe(false);
+  });
+
+  test('task_continuation key does not collide with continuation key format', () => {
+    // Verify the two namespaces never produce the same key for the same identifier
+    setContinuation('task-uuid-1', 'provider-session');
+    setTaskContinuation('task-uuid-1', 'task-session');
+
+    // They're distinct keys — each returns its own value
+    expect(getContinuation('task-uuid-1')).toBe('provider-session');
+    expect(getTaskContinuation('task-uuid-1')).toBe('task-session');
+
+    // getAllTaskContinuations must not include the provider slot
+    const map = getAllTaskContinuations();
+    expect(map.size).toBe(1);
+    expect(map.get('task-uuid-1')).toBe('task-session');
+  });
+
+  test('overwrite updates the stored value', () => {
+    setTaskContinuation('task-x', 'old-session');
+    setTaskContinuation('task-x', 'new-session');
+    expect(getTaskContinuation('task-x')).toBe('new-session');
   });
 });

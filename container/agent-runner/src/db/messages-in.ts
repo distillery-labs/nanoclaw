@@ -23,6 +23,17 @@ function hasOnWakeColumn(db: ReturnType<typeof openInboundDb>): boolean {
   return _hasOnWake;
 }
 
+// Cache whether inbound.db has the task_id column (added for sub-Skippy multiplex).
+let _hasTaskId: boolean | null = null;
+function hasTaskIdColumn(db: ReturnType<typeof openInboundDb>): boolean {
+  if (_hasTaskId !== null) return _hasTaskId;
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info('messages_in')").all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  _hasTaskId = cols.has('task_id');
+  return _hasTaskId;
+}
+
 export interface MessageInRow {
   id: string;
   seq: number | null;
@@ -38,6 +49,8 @@ export interface MessageInRow {
   channel_type: string | null;
   thread_id: string | null;
   content: string;
+  /** Distill task UUID — null means main session, non-null routes to a task session. */
+  task_id: string | null;
 }
 
 // Cap on how many messages reach the agent in one prompt. Read from
@@ -127,6 +140,75 @@ export function markFailed(id: string): void {
       "INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, 'failed', datetime('now'))",
     )
     .run(id);
+}
+
+/**
+ * Session-scoped variant of getPendingMessages for the multiplex supervisor.
+ *
+ * `taskId = null` → main session (WHERE task_id IS NULL, or all rows on hosts
+ *   that predate the task_id column)
+ * `taskId = "<uuid>"` → the named Distill task session (WHERE task_id = ?)
+ *
+ * Falls back to unfiltered behaviour on older inbound.db files that don't
+ * have the task_id column — all messages go to the main session, matching
+ * pre-multiplex semantics.
+ */
+export function getPendingMessagesForSession(taskId: string | null, isFirstPoll = false): MessageInRow[] {
+  const inbound = openInboundDb();
+  const outbound = getOutboundDb();
+  try {
+    const onWakeFilter = hasOnWakeColumn(inbound) ? 'AND (on_wake = 0 OR ?1 = 1)' : '';
+    const max = getMaxMessagesPerPrompt();
+    const firstPoll = isFirstPoll ? 1 : 0;
+
+    let pending: MessageInRow[];
+    if (!hasTaskIdColumn(inbound)) {
+      // Old host without task_id column — route everything to main session.
+      pending = inbound
+        .prepare(
+          `SELECT * FROM messages_in
+           WHERE status = 'pending'
+             AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
+             ${onWakeFilter}
+           ORDER BY seq DESC LIMIT ?2`,
+        )
+        .all(firstPoll, max) as MessageInRow[];
+    } else if (taskId === null) {
+      pending = inbound
+        .prepare(
+          `SELECT * FROM messages_in
+           WHERE status = 'pending'
+             AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
+             ${onWakeFilter}
+             AND task_id IS NULL
+           ORDER BY seq DESC LIMIT ?2`,
+        )
+        .all(firstPoll, max) as MessageInRow[];
+    } else {
+      pending = inbound
+        .prepare(
+          `SELECT * FROM messages_in
+           WHERE status = 'pending'
+             AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
+             ${onWakeFilter}
+             AND task_id = ?3
+           ORDER BY seq DESC LIMIT ?2`,
+        )
+        .all(firstPoll, max, taskId) as MessageInRow[];
+    }
+
+    if (pending.length === 0) return [];
+
+    const ackedIds = new Set(
+      (outbound.prepare('SELECT message_id FROM processing_ack').all() as Array<{ message_id: string }>).map(
+        (r) => r.message_id,
+      ),
+    );
+
+    return pending.filter((m) => !ackedIds.has(m.id)).reverse();
+  } finally {
+    inbound.close();
+  }
 }
 
 /** Get a message by ID (read from inbound.db). */

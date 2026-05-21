@@ -108,6 +108,15 @@ export function getOutboundDb(): Database {
         updated_at               TEXT NOT NULL
       );
     `);
+    // Forward-compat: add task_id to messages_out if it was created by an older
+    // host that predates sub-Skippy multiplex. The column is nullable — old rows
+    // (task_id IS NULL) are implicitly main-session messages.
+    const outCols = new Set(
+      (_outbound.prepare("PRAGMA table_info('messages_out')").all() as Array<{ name: string }>).map((c) => c.name),
+    );
+    if (outCols.has('id') && !outCols.has('task_id')) {
+      _outbound.exec(`ALTER TABLE messages_out ADD COLUMN task_id TEXT`);
+    }
   }
   return _outbound;
 }
@@ -197,7 +206,8 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       channel_type   TEXT,
       thread_id      TEXT,
       content        TEXT NOT NULL,
-      on_wake        INTEGER NOT NULL DEFAULT 0
+      on_wake        INTEGER NOT NULL DEFAULT 0,
+      task_id        TEXT
     );
     CREATE TABLE delivered (
       message_out_id      TEXT PRIMARY KEY,
@@ -229,7 +239,8 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       platform_id    TEXT,
       channel_type   TEXT,
       thread_id      TEXT,
-      content        TEXT NOT NULL
+      content        TEXT NOT NULL,
+      task_id        TEXT
     );
     CREATE TABLE processing_ack (
       message_id     TEXT PRIMARY KEY,
