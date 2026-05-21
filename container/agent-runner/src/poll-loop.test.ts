@@ -7,7 +7,9 @@ import { getTaskContinuation } from './db/session-state.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentProvider, AgentQuery, QueryInput } from './providers/types.js';
-import { dispatchTaskSession, type TaskSessionEntry, type PollLoopConfig } from './poll-loop.js';
+import { runPollLoop, dispatchTaskSession, type TaskSessionEntry, type PollLoopConfig } from './poll-loop.js';
+import type { DistillClientInterface } from './distill-client.js';
+import { setTaskContinuation } from './db/session-state.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -605,6 +607,106 @@ describe('task event emission', () => {
     // All emitted events should be for the task, not main session
     const events = getTaskEvents();
     expect(events.every((e) => e.task_id === 'task-ev-main-check')).toBe(true);
+  });
+});
+
+describe('distill integration — session_id write-back + startup filter', () => {
+  function makeConfig(distillClient?: DistillClientInterface): PollLoopConfig {
+    return {
+      provider: new MockProvider({ autoEnd: true }, () => 'ok'),
+      providerName: 'mock',
+      cwd: '/tmp',
+      distillClient,
+    };
+  }
+
+  it('calls patchTaskSessionId with taskId and SDK session id on init', async () => {
+    insertMessage('sid-msg-1', 'chat', { text: 'write back sid' }, { taskId: 'task-sid-1' });
+
+    const sidCalls: Array<{ taskId: string; sessionId: string }> = [];
+    const mockDistill: DistillClientInterface = {
+      getTaskStatus: async () => null,
+      patchTaskSessionId: async (taskId, sessionId) => { sidCalls.push({ taskId, sessionId }); },
+    };
+
+    const taskSessions = new Map<string, TaskSessionEntry>();
+    await dispatchTaskSession('task-sid-1', getPendingMessagesForSession('task-sid-1'), makeConfig(mockDistill), taskSessions);
+    const entry = taskSessions.get('task-sid-1');
+    if (entry?.queryPromise) await entry.queryPromise;
+
+    expect(sidCalls).toHaveLength(1);
+    expect(sidCalls[0].taskId).toBe('task-sid-1');
+    expect(typeof sidCalls[0].sessionId).toBe('string');
+    expect(sidCalls[0].sessionId.length).toBeGreaterThan(0);
+  });
+
+  it('does not call patchTaskSessionId when distillClient is absent', async () => {
+    insertMessage('sid-msg-2', 'chat', { text: 'no distill' }, { taskId: 'task-sid-2' });
+
+    const taskSessions = new Map<string, TaskSessionEntry>();
+    // No distillClient — should complete without error
+    await dispatchTaskSession('task-sid-2', getPendingMessagesForSession('task-sid-2'), makeConfig(), taskSessions);
+    const entry = taskSessions.get('task-sid-2');
+    if (entry?.queryPromise) await entry.queryPromise;
+
+    expect(getPendingMessagesForSession('task-sid-2')).toHaveLength(0);
+  });
+
+  it('startup filter: clears stale task continuation and skips restore when Distill reports terminal status', async () => {
+    setTaskContinuation('stale-task-1', 'old-session-id');
+    expect(getTaskContinuation('stale-task-1')).toBeDefined();
+
+    const queriedIds: string[] = [];
+    const mockDistill: DistillClientInterface = {
+      getTaskStatus: async (taskId) => { queriedIds.push(taskId); return 'completed'; },
+      patchTaskSessionId: async () => {},
+    };
+
+    const provider = new MockProvider({ autoEnd: true });
+    await Promise.race([
+      runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', distillClient: mockDistill }),
+      new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), 1000)),
+    ]).catch(() => {});
+
+    expect(queriedIds).toContain('stale-task-1');
+    // KV entry must be cleared so the store doesn't grow monotonically
+    expect(getTaskContinuation('stale-task-1')).toBeUndefined();
+  });
+
+  it('startup filter: restores task continuation when Distill reports active status', async () => {
+    setTaskContinuation('active-task-1', 'live-session-id');
+
+    const mockDistill: DistillClientInterface = {
+      getTaskStatus: async () => 'in_progress',
+      patchTaskSessionId: async () => {},
+    };
+
+    const provider = new MockProvider({ autoEnd: true });
+    await Promise.race([
+      runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', distillClient: mockDistill }),
+      new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), 1000)),
+    ]).catch(() => {});
+
+    // Continuation should still exist — was not cleared
+    expect(getTaskContinuation('active-task-1')).toBe('live-session-id');
+  });
+
+  it('startup filter: restores task continuation when Distill is unreachable (getTaskStatus throws)', async () => {
+    setTaskContinuation('err-task-1', 'session-on-error');
+
+    const mockDistill: DistillClientInterface = {
+      getTaskStatus: async () => { throw new Error('network error'); },
+      patchTaskSessionId: async () => {},
+    };
+
+    const provider = new MockProvider({ autoEnd: true });
+    await Promise.race([
+      runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', distillClient: mockDistill }),
+      new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), 1000)),
+    ]).catch(() => {});
+
+    // Error → treat as active, don't drop the continuation
+    expect(getTaskContinuation('err-task-1')).toBe('session-on-error');
   });
 });
 
